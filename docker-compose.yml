@@ -1,0 +1,22 @@
+services:
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      - CSV_DIR=/app/data
+    volumes:
+      - ./data:/app/data:ro
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_WS_URL: ws://localhost:3000/ws/stream
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped

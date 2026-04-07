@@ -1,0 +1,13 @@
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.git/
+.gitattributes
+.claude/
+.beads/
+*.md
+.dockerignore
