@@ -4,12 +4,14 @@ services:
     env_file: .env
     environment:
       - CSV_DIR=/app/data
-      # Override localhost → host.docker.internal so the container can reach the host
-      - DATALAKE_URL=http://host.docker.internal:8000
+      - DATALAKE_URL=http://ohlc-datalake-api:8000
     volumes:
       - ./data:/app/data:ro
     ports:
       - "8080:8000"
+    networks:
+      - default
+      - datalake
     restart: unless-stopped
 
   frontend:
@@ -18,7 +20,12 @@ services:
       args:
         VITE_WS_URL: ws://localhost:3000/ws/stream
     ports:
-      - "3000:3000"
+      - "7890:3000"
     depends_on:
       - backend
     restart: unless-stopped
+
+networks:
+  datalake:
+    external: true
+    name: datalake-api_datalake-network
