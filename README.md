@@ -49,7 +49,7 @@ pytest -v
 - **Tick data streaming** — connects to datalake WebSocket, aggregates ticks into candles in real-time, shows candles building live
 - **Live timeframe switching** — M1, M5, M15, H1 buttons on the chart; in tick mode, switches instantly without reconnecting (just re-groups ticks)
 - **Four strategies** — MA Crossover, Bollinger Mean Reversion, RSI+ADX Momentum, Tick Scalper (with intra-bar entries/exits via `on_tick()`)
-- **Live parameter tuning** via sidebar sliders (debounced, restarts replay)
+- **Live parameter tuning** via sidebar sliders (debounced; hot-swaps strategy in tick stream mode, restarts replay in bar mode)
 - **Live unrealized P&L** — sidebar position card updates from tick prices every 200ms
 - **Position sizing** — fixed-fraction risk model (2% of capital per trade), sized by stop-loss distance, capped at 10x leverage
 - **Cost model** — configurable spread, commission, and slippage
@@ -87,7 +87,7 @@ Strategies extend `AbstractStrategy` and register via `@register_strategy`. All 
 | **MA Crossover** | Fast MA crosses slow MA | Opposite cross or stop-loss | Price chart |
 | **Bollinger Mean Reversion** | Price touches upper/lower band | Reverts to SMA or stop-loss | Price chart |
 | **RSI+ADX Momentum** | RSI crosses 30/70 when ADX > 25 | RSI reversal, regime shift, or stop-loss | Separate pane |
-| **Tick Scalper** | EMA pullback entry via `on_tick()` | Intra-bar stop-loss/take-profit or trend reversal | Price chart |
+| **Tick Scalper** | EMA pullback entry via `on_tick()` (with trend strength filter) | Intra-bar stop-loss/take-profit via `on_tick()` | Price chart |
 
 ### Writing a new strategy
 
@@ -153,7 +153,7 @@ STRATEGY=tick_scalper
 | `GET` | `/api/health` | Server health + stats |
 | `GET` | `/api/strategies` | List strategies |
 | `POST` | `/api/strategy` | Switch strategy (restarts replay) |
-| `POST` | `/api/strategy/params` | Update strategy params (restarts replay) |
+| `POST` | `/api/strategy/params` | Update strategy params (hot-swap in tick stream mode) |
 | `POST` | `/api/timeframe` | Switch timeframe (instant in tick stream mode) |
 | `POST` | `/api/speed` | Change replay speed |
 | `POST` | `/api/pause` | Toggle pause/resume |

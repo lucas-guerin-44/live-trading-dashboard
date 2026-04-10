@@ -596,9 +596,11 @@ async def _run_stream_tick_replay(strategy) -> bool:
     from backtesting.tick import TickAggregator
 
     TICK_FLUSH_MS = 50
+    TICK_HISTORY_MAX = 200_000  # raw ticks to keep for timeframe re-aggregation (~60min of active trading)
     active_tf = replay_state.active_timeframe
     aggregator = TickAggregator(timeframe=active_tf)
-    tick_buffer: list[dict] = []
+    tick_buffer: list[dict] = []  # pending broadcast buffer
+    tick_history: list[dict] = []  # rolling raw tick buffer for re-aggregation
     last_flush = asyncio.get_event_loop().time()
     last_ts: str | None = None
 
@@ -662,22 +664,42 @@ async def _run_stream_tick_replay(strategy) -> bool:
                     break  # reconnect with new speed
 
                 # Timeframe change: reset aggregator without reconnecting.
-                # The tick stream continues — just group differently.
+                # Re-aggregate buffered ticks to backfill the chart.
                 if replay_state.active_timeframe != active_tf:
                     _flush_ticks()
                     active_tf = replay_state.active_timeframe
                     aggregator = TickAggregator(timeframe=active_tf)
-                    # Clear chart bars so frontend starts fresh candles
+
+                    # Re-aggregate tick history into bars for the new timeframe
+                    backfill_bars: list[dict] = []
+                    for raw in tick_history:
+                        t = Tick(
+                            ts=pd.Timestamp(raw["timestamp"]),
+                            price=float(raw["price"]),
+                            volume=float(raw.get("volume", 0)),
+                            bid=raw.get("bid"),
+                            ask=raw.get("ask"),
+                        )
+                        completed = aggregator.update(t)
+                        if completed is not None:
+                            bar = _backtesting_bar_to_dashboard(completed)
+                            bar.instrument = INSTRUMENT
+                            bar.timeframe = active_tf
+                            backfill_bars.append(bar.model_dump(mode="json"))
+
                     async with replay_state.lock:
-                        replay_state.bar_buffer = []
-                    # Notify clients of the timeframe change
+                        replay_state.bar_buffer = backfill_bars
+
                     snapshot = await replay_state.snapshot_data()
                     broadcast(serialize(WSMessage(
                         type=MessageType.SNAPSHOT,
                         data=snapshot,
                         timestamp=datetime.now(timezone.utc),
                     )))
-                    logger.info("Aggregator reset for new timeframe: %s", active_tf)
+                    logger.info(
+                        "Aggregator reset for %s — backfilled %d bars from %d ticks",
+                        active_tf, len(backfill_bars), len(tick_history),
+                    )
 
                 # Strategy params changed: hot-swap strategy without reconnecting.
                 # Reinstantiate with new params, reset aggregator + chart.
@@ -709,8 +731,11 @@ async def _run_stream_tick_replay(strategy) -> bool:
 
                 last_ts = tick_msg["timestamp"]
 
-                # Accumulate tick for batched broadcast
+                # Accumulate tick for batched broadcast + rolling history
                 tick_buffer.append(tick_msg)
+                tick_history.append(tick_msg)
+                if len(tick_history) > TICK_HISTORY_MAX:
+                    tick_history[:] = tick_history[-TICK_HISTORY_MAX:]
                 replay_state.tick_count += 1
 
                 # Aggregate into bars via backtesting engine

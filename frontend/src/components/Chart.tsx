@@ -273,7 +273,19 @@ export default function Chart({
 
   // ── Stream bars ─────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!seriesRef.current || !chartRef.current || bars.length === 0) return;
+    if (!seriesRef.current || !chartRef.current) return;
+
+    // Empty bars (e.g. after timeframe switch) — clear the series
+    if (bars.length === 0) {
+      seriesRef.current.setData([]);
+      const fastSeries = oscillator ? indFastRef.current : fastMaRef.current;
+      const slowSeries = oscillator ? indSlowRef.current : slowMaRef.current;
+      fastSeries?.setData([]);
+      slowSeries?.setData([]);
+      prevBarCountRef.current = 0;
+      updatesSinceResetRef.current = 0;
+      return;
+    }
 
     try {
       const prevCount = prevBarCountRef.current;
