@@ -48,9 +48,19 @@ export interface Metrics {
   avg_trade_duration_bars: number | null;
 }
 
+export interface Tick {
+  timestamp: string;
+  price: number;
+  volume: number;
+  bid?: number;
+  ask?: number;
+}
+
 export type MessageType =
   | "SNAPSHOT"
   | "BAR"
+  | "TICK"
+  | "TICK_BATCH"
   | "TRADE_OPEN"
   | "TRADE_CLOSE"
   | "METRICS"
@@ -61,6 +71,9 @@ export interface WSMessage {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- runtime WS boundary, not validated
   data: any;
   timestamp: string | null;
+  // Present on TICK_BATCH messages — the in-progress candle being built from ticks
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  current_bar?: any;
 }
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "waking_up";

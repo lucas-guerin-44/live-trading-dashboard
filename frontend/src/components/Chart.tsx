@@ -12,7 +12,7 @@ import {
   type UTCTimestamp,
   type ISeriesMarkersPluginApi,
 } from "lightweight-charts";
-import type { Bar, Trade } from "../types";
+import type { Bar, Tick, Trade } from "../types";
 
 interface ChartProps {
   bars: Bar[];
@@ -22,10 +22,17 @@ interface ChartProps {
   timeframe: string;
   indicatorLabels: [string, string];
   indicatorOverlay: boolean;
+  lastTickRef: React.RefObject<Tick | null>;
+  currentBarRef: React.RefObject<Bar | null>;
+  mode: "bar" | "tick" | "stream";
+  timeframes: string[];
+  onTimeframeChange: (tf: string) => void;
 }
 
 function toChartTime(ts: string): UTCTimestamp {
-  return (new Date(ts).getTime() / 1000) as UTCTimestamp;
+  // Ensure UTC parsing — datalake timestamps are UTC but may lack Z suffix
+  const utcStr = ts.endsWith("Z") ? ts : ts + "Z";
+  return (new Date(utcStr).getTime() / 1000) as UTCTimestamp;
 }
 
 const CHART_OPTS = {
@@ -54,7 +61,13 @@ export default function Chart({
   timeframe,
   indicatorLabels,
   indicatorOverlay,
+  lastTickRef,
+  currentBarRef,
+  mode,
+  timeframes,
+  onTimeframeChange,
 }: ChartProps) {
+  const hasTicks = mode === "tick" || mode === "stream";
   const [showLabels, setShowLabels] = useState(true);
   const oscillator = !indicatorOverlay;
 
@@ -65,6 +78,7 @@ export default function Chart({
   const fastMaRef = useRef<ISeriesApi<"Line"> | null>(null);
   const slowMaRef = useRef<ISeriesApi<"Line"> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<UTCTimestamp> | null>(null);
+  const priceLineRef = useRef<ISeriesApi<"Line"> | null>(null);
   const userScrolledRef = useRef(false);
   const prevBarCountRef = useRef(0);
   const updatesSinceResetRef = useRef(0);
@@ -213,6 +227,50 @@ export default function Chart({
     };
   }, [oscillator, indicatorLabels]);
 
+  // ── Tick price line (tick mode only) ────────────────────────────────────
+  // Creates/destroys the series when mode changes, then polls lastTickRef
+  // on a 50ms interval to update the price line imperatively — avoids
+  // React re-renders on every tick.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+
+    if (!hasTicks && priceLineRef.current) {
+      try { chart.removeSeries(priceLineRef.current); } catch { /* */ }
+      priceLineRef.current = null;
+    }
+
+    if (!hasTicks) return;
+
+    // Poll tick + partial bar refs and push updates to the chart imperatively.
+    // Updates the price line from lastTickRef and the current candle from currentBarRef.
+    let lastSeenBar: Bar | null = null;
+    let seriesInitialized = false;
+    const interval = setInterval(() => {
+      // Update current (partial) candle being built from ticks
+      const bar = currentBarRef.current;
+      if (bar && bar !== lastSeenBar && seriesRef.current) {
+        lastSeenBar = bar;
+        try {
+          const time = toChartTime(bar.timestamp);
+          const candle = { time, open: bar.open, high: bar.high, low: bar.low, close: bar.close };
+          if (!seriesInitialized) {
+            // First partial bar — seed the series so update() works
+            seriesRef.current.setData([candle]);
+            seriesInitialized = true;
+          } else {
+            seriesRef.current.update(candle);
+          }
+          if (!userScrolledRef.current) {
+            chartRef.current?.timeScale().scrollToRealTime();
+          }
+        } catch { /* chart disposed */ }
+      }
+    }, 50);
+
+    return () => clearInterval(interval);
+  }, [hasTicks, lastTickRef, currentBarRef]);
+
   // ── Stream bars ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current || bars.length === 0) return;
@@ -288,40 +346,18 @@ export default function Chart({
         return;
       }
 
-      // Dedup by trade ID — a trade can briefly appear in both arrays
-      // during state transitions, or the same array can contain duplicates
-      // if a broadcast + snapshot overlap between animation frames.
-      const seenIds = new Set<number>();
-      const allPositions = [...openPositions, ...closedPositions].filter((p) => {
-        if (seenIds.has(p.id)) return false;
-        seenIds.add(p.id);
-        return true;
-      });
-
-      const entryMarkers = allPositions
+      // Only show markers for open positions — closed trades are in the trade log
+      const entryMarkers = openPositions
         .map((pos) => ({
           time: toChartTime(pos.entry_time),
           position: pos.side === "BUY" ? ("belowBar" as const) : ("aboveBar" as const),
           color: pos.side === "BUY" ? "#22c55e" : "#ef4444",
           shape: pos.side === "BUY" ? ("arrowUp" as const) : ("arrowDown" as const),
           text: pos.side,
+          size: 0.5,
         }));
 
-      const exitIds = new Set<number>();
-      const exitMarkers = closedPositions
-        .filter((t) => {
-          if (!t.exit_time || !t.exit_price) return false;
-          if (exitIds.has(t.id)) return false;
-          exitIds.add(t.id);
-          return true;
-        })
-        .map((t) => ({
-          time: toChartTime(t.exit_time!),
-          position: t.side === "BUY" ? ("aboveBar" as const) : ("belowBar" as const),
-          color: t.pnl >= 0 ? "#22c55e" : "#ef4444",
-          shape: "circle" as const,
-          text: `${t.pnl >= 0 ? "+" : ""}${t.pnl.toFixed(0)}`,
-        }));
+      const exitMarkers: typeof entryMarkers = [];
 
       markersRef.current.setMarkers(
         [...entryMarkers, ...exitMarkers].sort((a, b) => (a.time as number) - (b.time as number))
@@ -335,8 +371,28 @@ export default function Chart({
   return (
     <div className="h-full flex flex-col p-3">
       <div className="flex items-center justify-between mb-1 shrink-0">
-        <h2 className="text-sm font-semibold text-neutral-200">
-          {instrument && timeframe ? `${instrument} ${timeframe}` : "Live Chart"}
+        <h2 className="text-sm font-semibold text-neutral-200 flex items-center gap-2">
+          <span>{instrument || "Live Chart"}</span>
+          {timeframes.length > 0 && (
+            <span className="flex gap-0.5">
+              {timeframes.map((tf) => (
+                <button
+                  key={tf}
+                  onClick={() => onTimeframeChange(tf)}
+                  className={`text-[11px] px-1.5 py-0.5 rounded transition-colors ${
+                    tf === timeframe
+                      ? "bg-blue-500/20 text-blue-400 border border-blue-500/40"
+                      : "text-neutral-500 hover:text-neutral-300"
+                  }`}
+                >
+                  {tf}
+                </button>
+              ))}
+            </span>
+          )}
+          {!timeframes.length && timeframe && (
+            <span className="text-neutral-400">{timeframe}</span>
+          )}
           {!oscillator && (
             <span className="ml-3 text-xs font-normal">
               <span className="inline-block w-3 h-0.5 bg-amber-500 mr-1 align-middle"></span>

@@ -1,11 +1,12 @@
 import { useState } from "react";
-import type { Bar, Trade } from "../types";
+import type { Bar, Tick, Trade } from "../types";
 import type { ParamDef } from "../hooks/useWebSocket";
 import Positions from "./Positions";
 
 interface SidebarProps {
   positions: Trade[];
   lastBar: Bar | null;
+  lastTickRef: React.RefObject<Tick | null>;
   strategy: string;
   strategies: string[];
   onStrategyChange: (name: string) => void;

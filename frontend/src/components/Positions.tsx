@@ -1,5 +1,5 @@
-import { useState } from "react";
-import type { Bar, Trade } from "../types";
+import { useState, useEffect, useRef } from "react";
+import type { Bar, Tick, Trade } from "../types";
 import type { ParamDef } from "../hooks/useWebSocket";
 import StrategyParams from "./StrategyParams";
 
@@ -7,11 +7,13 @@ const STRATEGY_LABELS: Record<string, string> = {
   ma_crossover: "MA Crossover",
   mean_reversion: "Mean Reversion",
   momentum: "RSI + ADX Momentum",
+  tick_scalper: "Tick Scalper",
 };
 
 interface PositionsProps {
   positions: Trade[];
   lastBar: Bar | null;
+  lastTickRef: React.RefObject<Tick | null>;
   strategy: string;
   strategies: string[];
   onStrategyChange: (name: string) => void;
@@ -19,8 +21,18 @@ interface PositionsProps {
   onUpdateParams: (params: Record<string, number>) => void;
 }
 
-export default function Positions({ positions, lastBar, strategy, strategies, onStrategyChange, configurableParams, onUpdateParams }: PositionsProps) {
+export default function Positions({ positions, lastBar, lastTickRef, strategy, strategies, onStrategyChange, configurableParams, onUpdateParams }: PositionsProps) {
   const [editingParams, setEditingParams] = useState(false);
+  // Poll tick ref for live price updates (avoids re-render on every tick)
+  const [livePrice, setLivePrice] = useState<number | null>(null);
+  useEffect(() => {
+    if (!lastTickRef) return;
+    const interval = setInterval(() => {
+      const tick = lastTickRef.current;
+      if (tick) setLivePrice((prev) => (prev === tick.price ? prev : tick.price));
+    }, 200);
+    return () => clearInterval(interval);
+  }, [lastTickRef]);
 
   return (
     <div className="h-full flex flex-col">
@@ -83,12 +95,13 @@ export default function Positions({ positions, lastBar, strategy, strategies, on
         ) : (
           <div className="space-y-2 overflow-y-auto min-h-0 flex-1">
             {positions.map((pos) => {
-              const currentPrice = lastBar?.close ?? pos.entry_price;
-              const unrealizedPnl =
+              const currentPrice = livePrice ?? lastBar?.close ?? pos.entry_price;
+              const priceDiff =
                 pos.side === "BUY"
                   ? currentPrice - pos.entry_price
                   : pos.entry_price - currentPrice;
-              const unrealizedPct = (unrealizedPnl / pos.entry_price) * 100;
+              const unrealizedPnl = priceDiff * pos.quantity;
+              const unrealizedPct = (unrealizedPnl / (pos.entry_price * pos.quantity)) * 100;
 
               return (
                 <div

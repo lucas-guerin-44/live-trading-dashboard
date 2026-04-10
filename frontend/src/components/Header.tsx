@@ -7,6 +7,8 @@ interface HeaderProps {
   barCount: number;
   totalBars: number;
   reconnectIn: number;
+  mode: "bar" | "tick" | "stream";
+  dataTime: string;
 }
 
 const GLASS = "glass rounded-md px-2.5 py-1 whitespace-nowrap";
@@ -17,6 +19,8 @@ export default function Header({
   barCount,
   totalBars,
   reconnectIn,
+  mode,
+  dataTime,
 }: HeaderProps) {
   const [pulse, setPulse] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
@@ -57,6 +61,18 @@ export default function Header({
             Replay
           </h1>
           <div className="w-px h-4 bg-neutral-600" />
+
+          {/* Mode badge */}
+          {(mode === "tick" || mode === "stream") && (
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 border border-sky-500/30">
+              TICK
+            </span>
+          )}
+
+          {/* Data time */}
+          {dataTime && (
+            <span className="text-xs tabular-nums text-neutral-400 font-mono">{dataTime}</span>
+          )}
 
           {/* Status dot + tooltip */}
           <div className="group relative flex items-center">

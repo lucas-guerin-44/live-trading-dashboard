@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel
 
@@ -15,6 +15,14 @@ class Bar(BaseModel):
     close: float
     instrument: str = "XAUUSD"
     timeframe: str = "M15"
+
+
+class TickData(BaseModel):
+    timestamp: str
+    price: float
+    volume: float = 0.0
+    bid: Optional[float] = None
+    ask: Optional[float] = None
 
 
 class Side(str, Enum):
@@ -71,6 +79,8 @@ class Metrics(BaseModel):
 class MessageType(str, Enum):
     SNAPSHOT = "SNAPSHOT"
     BAR = "BAR"
+    TICK = "TICK"
+    TICK_BATCH = "TICK_BATCH"
     TRADE_OPEN = "TRADE_OPEN"
     TRADE_CLOSE = "TRADE_CLOSE"
     METRICS = "METRICS"

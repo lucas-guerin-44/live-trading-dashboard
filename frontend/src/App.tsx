@@ -11,7 +11,8 @@ function App() {
     bars, openPositions, closedPositions, metrics, status, replayComplete,
     instrument, timeframe, totalBars, barCount, speed, paused, setSpeed, togglePause,
     equityCurve, reconnectIn, strategy, strategies, switchStrategy, indicatorLabels, indicatorOverlay,
-    configurableParams, updateParams,
+    configurableParams, updateParams, lastTickRef, currentBarRef, mode, tickCount,
+    timeframes, switchTimeframe, dataTime,
   } = useWebSocket(WS_URL);
 
   return (
@@ -27,6 +28,8 @@ function App() {
               barCount={barCount}
               totalBars={totalBars}
               reconnectIn={reconnectIn}
+              mode={mode}
+              dataTime={dataTime}
             />
             <Chart
               bars={bars}
@@ -36,6 +39,11 @@ function App() {
               timeframe={timeframe}
               indicatorLabels={indicatorLabels}
               indicatorOverlay={indicatorOverlay}
+              lastTickRef={lastTickRef}
+              currentBarRef={currentBarRef}
+              mode={mode}
+              timeframes={timeframes}
+              onTimeframeChange={switchTimeframe}
             />
           </div>
 
@@ -43,6 +51,7 @@ function App() {
           <Sidebar
             positions={openPositions}
             lastBar={bars.length > 0 ? bars[bars.length - 1] : null}
+            lastTickRef={lastTickRef}
             strategy={strategy}
             strategies={strategies}
             onStrategyChange={switchStrategy}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { Bar, Trade, Metrics, WSMessage, ConnectionStatus } from "../types";
+import type { Bar, Trade, Metrics, Tick, WSMessage, ConnectionStatus } from "../types";
 
 const INITIAL_METRICS: Metrics = {
   total_pnl: 0,
@@ -66,6 +66,16 @@ export interface DashboardState {
   indicatorOverlay: boolean;
   configurableParams: ParamDef[];
   updateParams: (params: Record<string, number>) => void;
+  timeframes: string[];
+  switchTimeframe: (tf: string) => void;
+  /** Ref to latest tick — read imperatively, does NOT trigger re-renders. */
+  lastTickRef: React.RefObject<Tick | null>;
+  /** Ref to current (partial) bar being built from ticks — updated on each TICK_BATCH. */
+  currentBarRef: React.RefObject<Bar | null>;
+  mode: "bar" | "tick" | "stream";
+  tickCount: number;
+  /** Current data time (from latest tick/bar timestamp), synced every 500ms. */
+  dataTime: string;
 }
 
 export function useWebSocket(baseUrl: string): DashboardState {
@@ -88,6 +98,19 @@ export function useWebSocket(baseUrl: string): DashboardState {
   const [indicatorLabels, setIndicatorLabels] = useState<[string, string]>(["MA10", "MA30"]);
   const [indicatorOverlay, setIndicatorOverlay] = useState(true);
   const [configurableParams, setConfigurableParams] = useState<ParamDef[]>([]);
+  const [timeframes, setTimeframes] = useState<string[]>([]);
+  const [mode, setMode] = useState<"bar" | "tick" | "stream">("bar");
+  const [tickCount, setTickCount] = useState(0);
+
+  // Tick data uses refs instead of state to avoid re-renders on every tick.
+  // The chart reads lastTickRef imperatively; tickCount syncs to state on
+  // a throttled interval (every 500ms) so the UI doesn't churn.
+  const speedRef = useRef(2);
+  const lastTickRef = useRef<Tick | null>(null);
+  const currentBarRef = useRef<Bar | null>(null);
+  const tickCountRef = useRef(0);
+  const [dataTime, setDataTime] = useState("");
+  const tickCountSyncTimer = useRef<ReturnType<typeof setInterval>>(undefined);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttempt = useRef(0);
@@ -123,6 +146,24 @@ export function useWebSocket(baseUrl: string): DashboardState {
           case "BAR":
             newBars.push(msg.data as Bar);
             break;
+          case "TICK":
+            // Legacy single-tick message (backwards compat)
+            lastTickRef.current = msg.data as Tick;
+            tickCountRef.current++;
+            break;
+          case "TICK_BATCH": {
+            // Batched ticks from server — only keep the last one for the price line
+            const ticks = msg.data as Tick[];
+            if (ticks.length > 0) {
+              lastTickRef.current = ticks[ticks.length - 1];
+              tickCountRef.current += ticks.length;
+            }
+            // Partial bar being built from ticks — update the current candle
+            if (msg.current_bar) {
+              currentBarRef.current = msg.current_bar as Bar;
+            }
+            break;
+          }
           case "TRADE_OPEN":
             opened.push(msg.data as Trade);
             break;
@@ -153,6 +194,7 @@ export function useWebSocket(baseUrl: string): DashboardState {
           if (snapshot.total_bars) setTotalBars(snapshot.total_bars);
           if (snapshot.speed != null) {
             setSpeedState(snapshot.speed);
+            speedRef.current = snapshot.speed;
             setPaused(snapshot.speed === 0);
           }
           if (snapshot.paused != null) setPaused(snapshot.paused);
@@ -162,6 +204,12 @@ export function useWebSocket(baseUrl: string): DashboardState {
           if (snapshot.indicator_labels) setIndicatorLabels(snapshot.indicator_labels);
           if (snapshot.indicator_overlay != null) setIndicatorOverlay(snapshot.indicator_overlay as boolean);
           if (snapshot.configurable_params) setConfigurableParams(snapshot.configurable_params);
+          if (snapshot.timeframes) setTimeframes(snapshot.timeframes);
+          if (snapshot.mode) setMode(snapshot.mode as "bar" | "tick" | "stream");
+          if (snapshot.tick_count != null) {
+            tickCountRef.current = snapshot.tick_count;
+            setTickCount(snapshot.tick_count);
+          }
           if (snapshot.bars) {
             setBars(snapshot.bars as Bar[]);
             setBarCount(snapshot.bars.length);
@@ -174,6 +222,8 @@ export function useWebSocket(baseUrl: string): DashboardState {
           }
           if (snapshot.closed_positions) setClosedPositions(snapshot.closed_positions as Trade[]);
           if (snapshot.bars?.length === 0) {
+            currentBarRef.current = null;
+            lastTickRef.current = null;
             setEquityCurve([]);
             setReplayComplete(false);
           }
@@ -307,9 +357,51 @@ export function useWebSocket(baseUrl: string): DashboardState {
 
   useEffect(() => {
     connect();
+    // Sync tick count every 500ms (avoids per-tick re-renders)
+    tickCountSyncTimer.current = setInterval(() => {
+      setTickCount((prev) => (prev === tickCountRef.current ? prev : tickCountRef.current));
+    }, 500);
+
+    // Smooth data clock: syncs once on first tick, then advances at speed rate.
+    // Only hard-resyncs if clock drifts >30s from the latest tick timestamp
+    // (e.g. after a pause/resume or speed change).
+    let clockMs = 0;
+    let synced = false;
+    let lastTickTs: string | null = null;
+    const DRIFT_THRESHOLD = 30_000; // 30s
+    const clockTimer = setInterval(() => {
+      const tick = lastTickRef.current;
+      if (tick && tick.timestamp !== lastTickTs) {
+        // Ensure UTC parsing — datalake timestamps are UTC but may lack Z suffix
+        const tsStr = tick.timestamp.endsWith("Z") ? tick.timestamp : tick.timestamp + "Z";
+        const tickMs = new Date(tsStr).getTime();
+        lastTickTs = tick.timestamp;
+        if (!synced) {
+          // First tick — initialize clock
+          clockMs = tickMs;
+          synced = true;
+        } else if (Math.abs(tickMs - clockMs) > DRIFT_THRESHOLD) {
+          // Drifted too far — hard resync
+          clockMs = tickMs;
+        }
+        // Otherwise ignore — let the clock free-run smoothly
+      }
+      if (synced) {
+        const spd = speedRef.current;
+        clockMs += 1000 * (spd > 0 ? spd : 1);
+        const d = new Date(clockMs);
+        const hh = String(d.getUTCHours()).padStart(2, "0");
+        const mm = String(d.getUTCMinutes()).padStart(2, "0");
+        const ss = String(d.getUTCSeconds()).padStart(2, "0");
+        const t = `${hh}:${mm}:${ss}`;
+        setDataTime((prev) => (prev === t ? prev : t));
+      }
+    }, 1000);
     return () => {
       clearTimeout(reconnectTimer.current);
       clearInterval(countdownTimer.current);
+      clearInterval(tickCountSyncTimer.current);
+      clearInterval(clockTimer);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       msgQueueRef.current = [];
       wsRef.current?.close();
@@ -326,6 +418,7 @@ export function useWebSocket(baseUrl: string): DashboardState {
   const setSpeed = useCallback(
     (newSpeed: number) => {
       setSpeedState(newSpeed);
+      speedRef.current = newSpeed;
       setPaused(false);
       fetch(`${apiBase}/api/speed`, {
         method: "POST",
@@ -356,6 +449,17 @@ export function useWebSocket(baseUrl: string): DashboardState {
     }
   }, [strategy, strategies, switchStrategy]);
 
+  const switchTimeframe = useCallback(
+    (tf: string) => {
+      fetch(`${apiBase}/api/timeframe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timeframe: tf }),
+      }).catch(() => {});
+    },
+    [apiBase]
+  );
+
   const updateParams = useCallback(
     (params: Record<string, number>) => {
       fetch(`${apiBase}/api/strategy/params`, {
@@ -371,6 +475,7 @@ export function useWebSocket(baseUrl: string): DashboardState {
     bars, openPositions, closedPositions, metrics, status, replayComplete,
     instrument, timeframe, totalBars, barCount, speed, paused, setSpeed, togglePause, equityCurve,
     reconnectIn, strategy, strategies, switchStrategy, indicatorLabels, indicatorOverlay,
-    configurableParams, updateParams,
+    configurableParams, updateParams, lastTickRef, currentBarRef, mode, tickCount,
+    timeframes, switchTimeframe, dataTime,
   };
 }

@@ -21,6 +21,7 @@ from abc import ABC, abstractmethod
 import math
 
 from models import Bar, Metrics, Side, Trade
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,14 @@ class AbstractStrategy(ABC):
             - data: Trade or Metrics model instance
         """
         ...
+
+    def on_tick(self, tick, current_bar: Optional[Bar], position, capital) -> Optional[dict]:
+        """Called on every tick. current_bar is the in-progress (incomplete) bar.
+
+        Default: no-op (strategy only reacts to completed bars).
+        Override this for intra-bar logic (e.g., stop management, limit orders).
+        """
+        return None
 
     @property
     def indicator_labels(self) -> tuple[str, str]:

@@ -1,18 +1,43 @@
-"""Replay engine: loads historical data and drip-feeds bars at configurable speed."""
+"""Replay engine: loads historical data and drip-feeds bars at configurable speed.
+
+Supports three data modes:
+- **bar**: Load OHLC bars from CSV or datalake REST API, drip-feed locally.
+- **tick**: Load raw ticks from CSV or datalake REST API, aggregate + drip-feed.
+- **stream**: Connect to datalake WebSocket endpoints (/ws/bars or /ws/ticks)
+  which handle pacing via real-time timestamp deltas scaled by a speed multiplier.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import csv
+import json
 import logging
+import math
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Optional
 
 import httpx
+import websockets
 
 from models import Bar
+
+# Add backtesting engine to path for Tick/TickAggregator imports.
+# MUST append (not insert) to avoid shadowing the dashboard's own modules
+# — the backtesting engine has its own strategies/ package.
+_BACKTESTING_ROOT = Path(__file__).resolve().parent.parent.parent / "backtesting-engine-2.0"
+if str(_BACKTESTING_ROOT) not in sys.path:
+    sys.path.append(str(_BACKTESTING_ROOT))
+
+try:
+    from backtesting.tick import Tick, TickAggregator
+    import pandas as pd
+    TICK_SUPPORT = True
+except ImportError:
+    TICK_SUPPORT = False
 
 logger = logging.getLogger(__name__)
 
@@ -235,3 +260,344 @@ async def replay_bars(
                 break
             await asyncio.sleep(0.1)
         await asyncio.sleep(base_interval / current_speed)
+
+
+# ── Tick data support ────────────────────────────────────────────────────────
+
+def _validate_tick(price: float, ts_str: str, row_idx: int) -> bool:
+    """Return True if tick data is sane."""
+    if price <= 0 or math.isnan(price):
+        logger.warning("Tick %d: invalid price %.4f — skipping", row_idx, price)
+        return False
+    if not ts_str:
+        logger.warning("Tick %d: empty timestamp — skipping", row_idx)
+        return False
+    return True
+
+
+def _validate_tick_sequence(ticks: list) -> list:
+    """Ensure ticks are sorted by timestamp (monotonic)."""
+    ticks.sort(key=lambda t: t.ts)
+    return ticks
+
+
+async def load_ticks_from_csv(
+    instrument: str = "XAUUSD",
+    csv_dir: Path = DEFAULT_CSV_DIR,
+) -> list:
+    """Load ticks from a CSV file.
+
+    Expected format: timestamp,price,volume (or timestamp,bid,ask,volume).
+    File naming: {INSTRUMENT}_TICK.csv
+    """
+    if not TICK_SUPPORT:
+        raise ImportError("Tick support requires the backtesting engine (backtesting.tick)")
+
+    filename = f"{instrument}_TICK.csv"
+    filepath = csv_dir / filename
+
+    if not filepath.exists():
+        raise FileNotFoundError(f"Tick data file not found: {filepath}")
+
+    ticks = []
+    with open(filepath, newline="") as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames or []
+        has_bid_ask = "bid" in headers and "ask" in headers
+
+        for idx, row in enumerate(reader):
+            ts_str = row.get("timestamp", "")
+            if has_bid_ask:
+                bid = float(row["bid"])
+                ask = float(row["ask"])
+                price = (bid + ask) / 2
+            else:
+                price = float(row.get("price", 0))
+                bid = None
+                ask = None
+
+            if not _validate_tick(price, ts_str, idx):
+                continue
+
+            volume = float(row.get("volume", 0))
+            tick = Tick(
+                ts=pd.Timestamp(ts_str),
+                price=price,
+                volume=volume,
+                bid=bid if has_bid_ask else None,
+                ask=ask if has_bid_ask else None,
+            )
+            ticks.append(tick)
+
+    ticks = _validate_tick_sequence(ticks)
+    logger.info("Loaded %d ticks from %s", len(ticks), filepath)
+    return ticks
+
+
+async def load_ticks_from_datalake(
+    instrument: str = "XAUUSD",
+    datalake_url: str = "http://localhost:8001",
+    api_key: str | None = None,
+) -> list:
+    """Load ticks from the datalake API."""
+    if not TICK_SUPPORT:
+        raise ImportError("Tick support requires the backtesting engine (backtesting.tick)")
+
+    ticks = []
+    cursor: str | None = None
+    headers = {"X-API-Key": api_key} if api_key else {}
+    row_idx = 0
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while True:
+            params: dict = {
+                "instrument": instrument,
+                "timeframe": "TICK",
+                "limit": 10000,
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            resp = await client.get(
+                f"{datalake_url}/query",
+                params=params,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+
+            for row in body.get("data", []):
+                ts_str = row.get("timestamp", "")
+                price = float(row.get("price", 0))
+                if not _validate_tick(price, ts_str, row_idx):
+                    row_idx += 1
+                    continue
+                tick = Tick(
+                    ts=pd.Timestamp(ts_str),
+                    price=price,
+                    volume=float(row.get("volume", 0)),
+                    bid=row.get("bid"),
+                    ask=row.get("ask"),
+                )
+                ticks.append(tick)
+                row_idx += 1
+
+            if not body.get("has_more", False):
+                break
+            cursor = body.get("next_cursor")
+
+    ticks = _validate_tick_sequence(ticks)
+    logger.info("Loaded %d ticks from datalake API", len(ticks))
+    return ticks
+
+
+async def load_ticks(
+    instrument: str = "XAUUSD",
+    datalake_url: str | None = None,
+    datalake_api_key: str | None = None,
+    csv_dir: Path | None = None,
+) -> list:
+    """Load ticks from datalake if available, fall back to CSV."""
+    if not TICK_SUPPORT:
+        return []
+
+    if datalake_url:
+        try:
+            return await load_ticks_from_datalake(instrument, datalake_url, datalake_api_key)
+        except Exception:
+            logger.warning("Datalake tick load failed, falling back to CSV", exc_info=True)
+
+    try:
+        return await load_ticks_from_csv(instrument, csv_dir=csv_dir or DEFAULT_CSV_DIR)
+    except FileNotFoundError:
+        return []
+
+
+def tick_data_available(
+    instrument: str = "XAUUSD",
+    csv_dir: Path = DEFAULT_CSV_DIR,
+) -> bool:
+    """Check if tick data exists for the given instrument."""
+    if not TICK_SUPPORT:
+        return False
+    filepath = csv_dir / f"{instrument}_TICK.csv"
+    return filepath.exists()
+
+
+def _backtesting_bar_to_dashboard(bar) -> Bar:
+    """Convert a backtesting-engine Bar to a dashboard Bar."""
+    return Bar(
+        timestamp=bar.ts.to_pydatetime(),
+        open=bar.open,
+        high=bar.high,
+        low=bar.low,
+        close=bar.close,
+    )
+
+
+async def replay_ticks(
+    ticks: list,
+    aggregator: Any,
+    speed: float | Callable[[], float] = 1.0,
+    base_interval: float = 0.05,
+) -> AsyncIterator[dict]:
+    """Yield tick events with optional completed bars.
+
+    Each yield is a dict: {"tick": Tick, "bar": Bar|None}
+    where bar is not None when the tick crossed a bar boundary.
+
+    At high speeds, processes multiple ticks per sleep cycle to avoid
+    event-loop overhead dominating. asyncio.sleep() has ~1ms minimum
+    resolution, so at 10x speed the naive 0.005s sleep per tick is
+    clamped to ~1ms — meaning 900 ticks/bar takes ~0.9s of pure sleep
+    overhead. Instead, we compute how many ticks to process in one
+    batch so total elapsed time stays proportional to wall-clock speed.
+
+    Args:
+        ticks: Pre-loaded list of Tick objects.
+        aggregator: TickAggregator instance (from backtesting engine).
+        speed: Replay speed multiplier, or callable returning current speed.
+        base_interval: Base seconds between ticks (before speed adjustment).
+    """
+    # Minimum sleep quantum — below this, asyncio.sleep resolution wastes time
+    MIN_SLEEP = 0.01  # 10ms
+
+    i = 0
+    n = len(ticks)
+    while i < n:
+        # Wait while paused (speed == 0)
+        while True:
+            current_speed = speed() if callable(speed) else speed
+            if current_speed > 0:
+                break
+            await asyncio.sleep(0.1)
+
+        # Compute how many ticks to process before the next sleep.
+        # target_sleep = base_interval / speed, but we clamp to MIN_SLEEP
+        # and process multiple ticks to compensate.
+        target_sleep = base_interval / current_speed
+        if target_sleep >= MIN_SLEEP:
+            batch_size = 1
+            actual_sleep = target_sleep
+        else:
+            # How many ticks fit into one MIN_SLEEP window?
+            batch_size = max(1, int(MIN_SLEEP / target_sleep))
+            actual_sleep = MIN_SLEEP
+
+        # Process batch_size ticks (or remaining, whichever is smaller)
+        end = min(i + batch_size, n)
+        while i < end:
+            tick = ticks[i]
+            completed_bar = aggregator.update(tick)
+            dashboard_bar = _backtesting_bar_to_dashboard(completed_bar) if completed_bar else None
+            yield {"tick": tick, "bar": dashboard_bar}
+            i += 1
+
+        await asyncio.sleep(actual_sleep)
+
+    # Flush the last partial bar
+    final_bar = aggregator.flush()
+    if final_bar is not None:
+        yield {"tick": ticks[-1], "bar": _backtesting_bar_to_dashboard(final_bar)}
+
+
+# ── Datalake WebSocket streaming ─────────────────────────────────────────────
+
+def _datalake_ws_url(base_url: str) -> str:
+    """Convert a datalake HTTP URL to its WebSocket equivalent."""
+    return base_url.replace("http://", "ws://").replace("https://", "wss://")
+
+
+async def stream_bars_from_datalake(
+    instrument: str,
+    timeframe: str,
+    datalake_url: str,
+    speed: float = 1.0,
+    max_delay: float = 0.5,
+    start: str | None = None,
+    end: str | None = None,
+) -> AsyncIterator[Bar]:
+    """Connect to datalake /ws/bars and yield Bar objects.
+
+    The datalake controls pacing (real-time timestamp deltas / speed),
+    capped by max_delay to avoid long waits on data gaps.
+    Yields until the datalake sends {"done": true} or the connection closes.
+
+    Args:
+        instrument: e.g. "XAUUSD"
+        timeframe: e.g. "M15"
+        datalake_url: HTTP base URL (converted to ws:// internally)
+        speed: Playback speed multiplier (1.0 = real-time)
+        max_delay: Maximum seconds between messages (caps gap sleeps)
+        start: Optional ISO-8601 start bound (for resuming after reconnect)
+        end: Optional ISO-8601 end bound
+    """
+    ws_base = _datalake_ws_url(datalake_url)
+    params = f"instrument={instrument}&timeframe={timeframe}&speed={speed}&max_delay={max_delay}"
+    if start:
+        params += f"&start={start}"
+    if end:
+        params += f"&end={end}"
+    url = f"{ws_base}/ws/bars?{params}"
+
+    logger.info("Connecting to datalake bar stream: %s", url)
+    async with websockets.connect(url, open_timeout=120) as ws:
+        async for raw in ws:
+            msg = json.loads(raw)
+            if msg.get("done"):
+                logger.info("Datalake bar stream complete")
+                return
+            if "error" in msg:
+                logger.error("Datalake bar stream error: %s", msg["error"])
+                return
+            yield Bar(
+                timestamp=datetime.fromisoformat(msg["timestamp"]),
+                open=float(msg["open"]),
+                high=float(msg["high"]),
+                low=float(msg["low"]),
+                close=float(msg["close"]),
+                instrument=instrument,
+                timeframe=timeframe,
+            )
+
+
+async def stream_ticks_from_datalake(
+    instrument: str,
+    datalake_url: str,
+    speed: float = 1.0,
+    max_delay: float = 0.5,
+    start: str | None = None,
+    end: str | None = None,
+) -> AsyncIterator[dict]:
+    """Connect to datalake /ws/ticks and yield raw tick dicts.
+
+    Each yielded dict has: timestamp, price, volume, bid (optional), ask (optional).
+    The datalake controls pacing, capped by max_delay. Yields until {"done": true}.
+
+    Args:
+        instrument: e.g. "XAUUSD"
+        datalake_url: HTTP base URL (converted to ws:// internally)
+        speed: Playback speed multiplier
+        max_delay: Maximum seconds between messages
+        start: Optional ISO-8601 start bound
+        end: Optional ISO-8601 end bound
+    """
+    ws_base = _datalake_ws_url(datalake_url)
+    params = f"instrument={instrument}&speed={speed}&max_delay={max_delay}"
+    if start:
+        params += f"&start={start}"
+    if end:
+        params += f"&end={end}"
+    url = f"{ws_base}/ws/ticks?{params}"
+
+    logger.info("Connecting to datalake tick stream: %s", url)
+    async with websockets.connect(url, open_timeout=120) as ws:
+        async for raw in ws:
+            msg = json.loads(raw)
+            if msg.get("done"):
+                logger.info("Datalake tick stream complete")
+                return
+            if "error" in msg:
+                logger.error("Datalake tick stream error: %s", msg["error"])
+                return
+            yield msg

@@ -60,7 +60,9 @@ function StrategyParamsInner({ params, onUpdate, onClose }: StrategyParamsProps)
             <div className="flex items-center justify-between mb-1">
               <label className="text-xs text-neutral-400">{p.label}</label>
               <span className="text-xs font-mono text-neutral-200 tabular-nums bg-neutral-800 px-1.5 py-0.5 rounded">
-                {p.type === "int" ? values[p.name] : values[p.name]?.toFixed(1)}
+                {p.type === "int"
+                  ? values[p.name]
+                  : values[p.name]?.toFixed(Math.max(1, -Math.floor(Math.log10(p.step))))}
               </span>
             </div>
             <input
