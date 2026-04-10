@@ -33,7 +33,7 @@ from replay import (
 
 # Conditional imports for tick support (used in stream tick replay)
 if TICK_SUPPORT:
-    from backtesting.tick import Tick
+    from tick_engine import Tick
     import pandas as pd
 from base_strategy import get_strategy, STRATEGY_REGISTRY
 import strategies as _strategies  # noqa: F401 - triggers @register_strategy decorators
@@ -386,7 +386,7 @@ async def _run_tick_replay(strategy) -> bool:
     4. No redundant envelope timestamps: tick data carries its own timestamp,
        the WSMessage envelope timestamp is omitted for TICK_BATCH.
     """
-    from backtesting.tick import TickAggregator
+    from tick_engine import TickAggregator
 
     TICK_FLUSH_MS = 50  # flush tick buffer every 50ms
     aggregator = TickAggregator(timeframe=replay_state.active_timeframe)
@@ -593,7 +593,7 @@ async def _run_stream_tick_replay(strategy) -> bool:
 
     Returns True if restarted (strategy switch).
     """
-    from backtesting.tick import TickAggregator
+    from tick_engine import TickAggregator
 
     TICK_FLUSH_MS = 50
     TICK_HISTORY_MAX = 200_000  # raw ticks to keep for timeframe re-aggregation (~60min of active trading)

@@ -4,10 +4,12 @@ services:
     env_file: .env
     environment:
       - CSV_DIR=/app/data
+      # Override localhost → host.docker.internal so the container can reach the host
+      - DATALAKE_URL=http://host.docker.internal:8000
     volumes:
       - ./data:/app/data:ro
     ports:
-      - "8000:8000"
+      - "8080:8000"
     restart: unless-stopped
 
   frontend:

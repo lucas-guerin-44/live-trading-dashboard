@@ -15,7 +15,6 @@ import json
 import logging
 import math
 import os
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Optional
@@ -25,15 +24,8 @@ import websockets
 
 from models import Bar
 
-# Add backtesting engine to path for Tick/TickAggregator imports.
-# MUST append (not insert) to avoid shadowing the dashboard's own modules
-# — the backtesting engine has its own strategies/ package.
-_BACKTESTING_ROOT = Path(__file__).resolve().parent.parent.parent / "backtesting-engine-2.0"
-if str(_BACKTESTING_ROOT) not in sys.path:
-    sys.path.append(str(_BACKTESTING_ROOT))
-
 try:
-    from backtesting.tick import Tick, TickAggregator
+    from tick_engine import Tick, TickAggregator
     import pandas as pd
     TICK_SUPPORT = True
 except ImportError:

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import type { Bar, Tick, Trade } from "../types";
 import type { ParamDef } from "../hooks/useWebSocket";
 import StrategyParams from "./StrategyParams";

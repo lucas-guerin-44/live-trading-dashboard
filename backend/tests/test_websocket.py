@@ -44,7 +44,7 @@ def app(test_bars):
     import main as main_module
 
     main_module.bars_cache = test_bars
-    main_module.connected_clients = set()
+    main_module.connected_clients = {}
     main_module.replay_state = main_module.ReplayState()
 
     with patch.object(main_module, "load_bars", new_callable=AsyncMock, return_value=test_bars):

@@ -11,7 +11,7 @@ function App() {
     bars, openPositions, closedPositions, metrics, status, replayComplete,
     instrument, timeframe, totalBars, barCount, speed, paused, setSpeed, togglePause,
     equityCurve, reconnectIn, strategy, strategies, switchStrategy, indicatorLabels, indicatorOverlay,
-    configurableParams, updateParams, lastTickRef, currentBarRef, mode, tickCount,
+    configurableParams, updateParams, lastTickRef, currentBarRef, mode,
     timeframes, switchTimeframe, dataTime,
   } = useWebSocket(WS_URL);
 
